@@ -1,0 +1,110 @@
+# ============================================================
+# HLPE — Hybrid Landslide Prediction Engine
+# Configuration File
+# ============================================================
+
+# --- Study Area ---
+study_area:
+  name: "Western Ghats, India"           # Change to your region
+  bbox:
+    min_lon: 75.0
+    max_lon: 77.0
+    min_lat: 10.0
+    max_lat: 12.0
+  crs: "EPSG:4326"                        # Coordinate reference system
+  dem_resolution: 30                      # meters (30 = SRTM, 12 = ALOS)
+
+# --- Rainfall Configuration ---
+rainfall:
+  primary_source: "gpm_imerg"            # gpm_imerg | open_meteo | manual
+  backup_source: "open_meteo"
+  antecedent_days: 15                    # Days of antecedent rainfall to track
+  swi_timescale_days: 5                  # T parameter for SWI exponential filter
+  update_interval_hours: 6              # How often to fetch new data
+  manual_stations:                       # Add local rain gauge stations
+    - id: "STA001"
+      name: "Station Alpha"
+      lat: 11.0
+      lon: 76.0
+    # - id: "STA002"
+    #   name: "Station Beta"
+    #   lat: 11.5
+    #   lon: 76.3
+
+# --- Soil Parameters (defaults, override with local data) ---
+soil:
+  use_soilgrids_api: true               # Auto-fetch from ISRIC SoilGrids
+  default_params:
+    cohesion_kpa: 5.0                   # Effective cohesion C' (kPa)
+    friction_angle_deg: 32.0            # Effective friction angle φ' (degrees)
+    unit_weight_kNm3: 18.0             # Soil unit weight γs (kN/m³)
+    soil_depth_m: 1.5                   # Default soil depth Z (m)
+    saturated_hydraulic_conductivity: 1e-5  # Ks (m/s)
+  pedotransfer: true                    # Estimate C, φ from texture if no data
+
+# --- Physics Model ---
+physics:
+  model: "infinite_slope"              # infinite_slope | trigrs_simplified
+  fs_thresholds:
+    extreme: 0.9
+    high: 1.1
+    elevated: 1.3
+    moderate: 1.5
+  pore_pressure_method: "swi_proxy"    # swi_proxy | iverson_simplified
+  slope_unit_method: "auto"            # auto | upload (shapefile)
+
+# --- Intensity-Duration Thresholds ---
+id_thresholds:
+  auto_calibrate: true                 # Calibrate from landslide inventory
+  min_events_for_calibration: 10       # Min events needed
+  default_alpha: 14.82                 # I = alpha * D^(-beta)
+  default_beta: 0.39
+  exceedance_levels: [0.05, 0.25, 0.50]  # Probability levels for warning
+
+# --- Machine Learning ---
+ml:
+  enabled: true
+  model_type: "ensemble"               # ensemble | xgboost | random_forest
+  n_estimators: 200
+  retrain_interval_days: 30           # Auto-retrain frequency
+  min_training_samples: 50            # Min samples before ML activates
+  shap_enabled: true
+
+# --- Risk Consensus Weights ---
+# These are auto-calibrated if enough data. Set manually otherwise.
+consensus:
+  weight_fs: 0.30
+  weight_ml: 0.35
+  weight_id: 0.20
+  weight_swi: 0.15
+
+# --- Alert Configuration ---
+alerts:
+  enabled: true
+  levels:
+    extreme: 90      # Score threshold
+    high: 70
+    elevated: 50
+    moderate: 30
+  email:
+    enabled: false
+    smtp_server: ""
+    smtp_port: 587
+    sender: ""
+    recipients: []
+  log_to_file: true
+
+# --- Data Paths ---
+paths:
+  data_root: "data"
+  static: "data/static"
+  dynamic: "data/dynamic"
+  user_uploads: "data/user_uploads"
+  models: "models"
+  reports: "reports"
+  logs: "logs"
+
+# --- API Keys (optional, for premium sources) ---
+api_keys:
+  nasa_earthdata: ""                   # For GPM IMERG (free registration)
+  opentopodata: ""                     # Optional, has free tier
