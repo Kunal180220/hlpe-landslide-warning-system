@@ -4,7 +4,7 @@
 [![Streamlit](https://img.shields.io/badge/dashboard-streamlit-red.svg)](https://streamlit.io/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A **fully dynamic, open-source, AI-powered landslide early warning system** that combines physics-based modelling with machine learning. Designed for researchers, disaster management teams, and field engineers.
+**AI + Physics Hybrid Landslide Early Warning System — Streamlit dashboard with live rainfall, Factor of Safety, ML ensemble and ID threshold analysis**
 
 ---
 
