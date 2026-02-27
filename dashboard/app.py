@@ -679,102 +679,229 @@ with tabs[1]:
 # TAB 3: RAINFALL
 # ═══════════════════════════════════════════════════════════════════
 with tabs[2]:
-    st.subheader("🌧️ Rainfall Analysis")
-    
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.markdown("**Add Manual Station Data**")
-        station_name = st.text_input("Station Name", "")
-        manual_lat = st.number_input("Latitude", value=get_current_center()[0], format="%.4f")
-        manual_lon = st.number_input("Longitude", value=get_current_center()[1], format="%.4f")
-        today_rain = st.number_input("Today's Rainfall (mm)", min_value=0.0, max_value=1000.0, value=0.0, step=0.5)
-        yesterday_rain = st.number_input("Yesterday's Rainfall (mm)", min_value=0.0, max_value=500.0, value=0.0, step=0.5)
-        
-        if st.button("➕ Add Station", use_container_width=True):
-            if "rain_stations" not in st.session_state:
-                st.session_state.rain_stations = []
-            st.session_state.rain_stations.append({
-                "name": station_name or f"Station_{len(st.session_state.get('rain_stations',[]))+1}",
-                "lat": manual_lat, "lon": manual_lon,
-                "today_mm": today_rain, "yesterday_mm": yesterday_rain,
-                "timestamp": datetime.now().strftime("%H:%M")
-            })
-            st.session_state.manual_rainfall = {"today_mm": today_rain}
-            st.success("Station added!")
-        
-        # Show station list
-        if "rain_stations" in st.session_state and st.session_state.rain_stations:
-            st.markdown("**Active Stations:**")
-            for s in st.session_state.rain_stations:
-                st.markdown(f"📡 **{s['name']}** — {s['today_mm']} mm today")
-    
-    with col2:
-        if st.session_state.computed and st.session_state.slope_df is not None:
+    st.subheader("🌧️ Rainfall Monitor")
+    r_tabs = st.tabs(["📡 Live Rainfall Checker", "📊 Area Analysis", "➕ Manual Station Entry"])
+
+    # ── SUB-TAB 1: LIVE RAINFALL CHECKER ──
+    with r_tabs[0]:
+        st.markdown("**Check real Open-Meteo rainfall for any location**")
+        col1, col2 = st.columns([1, 2])
+
+        with col1:
+            center = get_current_center()
+            chk_lat = st.number_input("Latitude", value=round(center[0], 4), format="%.4f", key="chk_lat")
+            chk_lon = st.number_input("Longitude", value=round(center[1], 4), format="%.4f", key="chk_lon")
+            chk_days = st.slider("Days of history", 7, 30, 15, key="chk_days")
+            st.markdown("**Quick Presets:**")
+            presets = {
+                "Ooty (Nilgiris)": (11.41, 76.69),
+                "Munnar (Idukki)": (10.08, 77.06),
+                "Coonoor": (11.35, 76.82),
+                "Darjeeling": (27.03, 88.26),
+                "Gangtok (Sikkim)": (27.35, 88.65),
+                "Shillong": (25.57, 91.88),
+                "Manali": (32.24, 77.19),
+                "Dehradun": (30.32, 78.03),
+                "Kohima": (25.67, 94.11),
+                "Aizawl": (23.73, 92.72),
+            }
+            preset_choice = st.selectbox("Or pick known location", ["— Custom —"] + list(presets.keys()))
+            if preset_choice != "— Custom —":
+                chk_lat = presets[preset_choice][0]
+                chk_lon = presets[preset_choice][1]
+            fetch_btn = st.button("🌐 Fetch Live Rainfall", type="primary", use_container_width=True)
+
+        with col2:
+            if fetch_btn:
+                from engine.rainfall_fetcher import fetch_live_rainfall_for_location, compute_swi
+                with st.spinner(f"Fetching from Open-Meteo for {chk_lat:.4f}°N, {chk_lon:.4f}°E..."):
+                    result = fetch_live_rainfall_for_location(chk_lat, chk_lon, days_back=chk_days)
+
+                if result["success"]:
+                    dates = result["dates"]
+                    values = result["values"]
+                    swi_list = compute_swi(values)
+
+                    total_today = values[-1] if values else 0
+                    total_7day = sum(values[-7:]) if len(values) >= 7 else sum(values)
+                    total_15day = sum(values[-15:]) if len(values) >= 15 else sum(values)
+                    swi_now = round(swi_list[-1], 2)
+
+                    st.success(f"✅ **{result['source']}** — {len(dates)} days retrieved")
+                    st.caption(f"📍 {chk_lat:.4f}°N, {chk_lon:.4f}°E | Fetched: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+
+                    k1, k2, k3, k4 = st.columns(4)
+                    k1.metric("☔ Today (mm)", f"{total_today:.1f}")
+                    k2.metric("📅 7-day total", f"{total_7day:.1f} mm")
+                    k3.metric("📅 15-day total", f"{total_15day:.1f} mm")
+                    k4.metric("💧 SWI now", f"{swi_now:.2f}")
+
+                    try:
+                        import plotly.graph_objects as go
+                        colors = ["#e74c3c" if v > 30 else "#f39c12" if v > 10 else "#3498db" for v in values]
+                        fig = go.Figure()
+                        fig.add_trace(go.Bar(
+                            x=dates, y=values, marker_color=colors,
+                            name="Daily Rainfall (mm)",
+                            hovertemplate="%{x}<br><b>%{y:.1f} mm</b><extra></extra>",
+                        ))
+                        fig.add_trace(go.Scatter(
+                            x=dates, y=swi_list, mode="lines+markers",
+                            name="Soil Water Index (SWI)",
+                            line=dict(color="#9b59b6", width=2.5),
+                            yaxis="y2",
+                        ))
+                        fig.add_hline(y=30, line_dash="dash", line_color="red",
+                                      annotation_text="Heavy Rain threshold (30mm)")
+                        fig.add_hline(y=10, line_dash="dot", line_color="orange",
+                                      annotation_text="Moderate Rain (10mm)")
+                        fig.update_layout(
+                            title=f"📡 Live Rainfall — {preset_choice if preset_choice != '— Custom —' else f'{chk_lat:.3f}°N {chk_lon:.3f}°E'}",
+                            xaxis_title="Date",
+                            yaxis_title="Rainfall (mm)",
+                            yaxis2=dict(title="SWI", overlaying="y", side="right", showgrid=False),
+                            height=400, legend=dict(orientation="h", y=1.12),
+                            plot_bgcolor="#f8f9fa", paper_bgcolor="white",
+                        )
+                        st.plotly_chart(fig, use_container_width=True)
+                    except ImportError:
+                        st.dataframe(pd.DataFrame({"Date": dates, "Rainfall (mm)": values, "SWI": swi_list}))
+
+                    with st.expander("📋 Raw Daily Data Table"):
+                        rain_table = pd.DataFrame({
+                            "Date": dates,
+                            "Rainfall (mm)": [round(v, 1) for v in values],
+                            "SWI": [round(s, 2) for s in swi_list],
+                            "Status": ["🔴 Heavy" if v > 30 else "🟠 Moderate" if v > 10 else "🟡 Light" if v > 2 else "🟢 Dry" for v in values],
+                        })
+                        st.dataframe(rain_table, use_container_width=True, hide_index=True)
+                else:
+                    st.error("❌ Could not reach Open-Meteo API. Check your internet connection.")
+            else:
+                st.markdown("""
+                <div style="background:#f0f4f8;border-radius:10px;padding:2rem;text-align:center;color:#4a5568;margin-top:1rem;">
+                    <h3>📡 Live Rainfall Checker</h3>
+                    <p>Pick a location preset or enter lat/lon, then click <b>Fetch Live Rainfall</b></p>
+                    <p style="font-size:0.85rem;color:#718096;">
+                    Shows real daily rainfall + Soil Water Index for last 7–30 days<br>
+                    Source: <b>Open-Meteo</b> (free, no API key needed)
+                    </p>
+                </div>
+                """, unsafe_allow_html=True)
+
+        st.markdown("---")
+        st.markdown("**📌 Data Source Guide:**")
+        c1, c2, c3 = st.columns(3)
+        c1.markdown("""<div style="background:#fff3cd;border-radius:8px;padding:0.8rem;border-left:4px solid #ffc107;">
+            <b>⚠️ Synthetic (default)</b><br><small>Fake random rainfall. For demo only.<br>Turn ON Live API toggle in sidebar.</small></div>""", unsafe_allow_html=True)
+        c2.markdown("""<div style="background:#d4edda;border-radius:8px;padding:0.8rem;border-left:4px solid #28a745;">
+            <b>✅ Live API (Open-Meteo)</b><br><small>Real satellite rainfall per coordinate.<br>Enable via Live Rainfall API toggle.</small></div>""", unsafe_allow_html=True)
+        c3.markdown("""<div style="background:#cce5ff;border-radius:8px;padding:0.8rem;border-left:4px solid #007bff;">
+            <b>✏️ Manual Entry</b><br><small>Your field gauge readings.<br>Highest priority — overrides API.</small></div>""", unsafe_allow_html=True)
+
+    # ── SUB-TAB 2: AREA ANALYSIS ──
+    with r_tabs[1]:
+        if not st.session_state.computed or st.session_state.slope_df is None:
+            st.info("Compute risk scores first (sidebar button).")
+        else:
             df = st.session_state.slope_df
-            
+            if "data_source" in df.columns:
+                src = df["data_source"].iloc[0]
+                if "Synthetic" in src:
+                    st.warning(f"⚠️ Rainfall is **SYNTHETIC** — turn ON 'Live Rainfall API' in sidebar and recompute for real values.")
+                elif "Live" in src:
+                    st.success(f"✅ Using **Live Open-Meteo** rainfall data")
+                elif "Manual" in src:
+                    st.info("✏️ Using **Manual entry** rainfall data")
+
+            group_col = "taluk" if st.session_state.selected_district else "district"
             try:
                 import plotly.express as px
-                
-                group_col = "taluk" if st.session_state.selected_district else "district"
-                
-                # Rainfall by area
                 rain_summary = df.groupby(group_col).agg(
-                    R_24hr=("R_24hr", "mean"),
-                    R_7day=("R_7day", "mean"),
-                    R_15day=("R_15day", "mean"),
+                    Slopes=("slope_id", "count"),
+                    Today_mm=("R_24hr", "mean"),
+                    Day7_mm=("R_7day", "mean"),
+                    Day15_mm=("R_15day", "mean"),
                     SWI=("SWI", "mean"),
                 ).round(2).reset_index()
-                
+                rain_summary.columns = [group_col.title(), "Slopes", "Today (mm)", "7-day (mm)", "15-day (mm)", "SWI"]
+                st.markdown(f"**Rainfall by {group_col.title()}**")
+                st.dataframe(rain_summary, use_container_width=True, hide_index=True)
+
                 fig = px.bar(
-                    rain_summary.melt(id_vars=group_col, value_vars=["R_24hr", "R_7day", "R_15day"]),
+                    df.groupby(group_col)[["R_24hr","R_7day","R_15day"]].mean().round(2).reset_index()
+                      .melt(id_vars=group_col, value_vars=["R_24hr","R_7day","R_15day"]),
                     x=group_col, y="value", color="variable", barmode="group",
                     title=f"Rainfall by {group_col.title()}",
-                    labels={"value": "Rainfall (mm)", group_col: group_col.title(), "variable": "Period"},
-                    color_discrete_map={"R_24hr": "#3182ce", "R_7day": "#805ad5", "R_15day": "#d53f8c"},
+                    color_discrete_map={"R_24hr":"#3498db","R_7day":"#8e44ad","R_15day":"#e74c3c"},
+                    labels={"value":"Rainfall (mm)", "variable":"Period", group_col: group_col.title()},
                 )
                 fig.update_layout(height=350)
                 st.plotly_chart(fig, use_container_width=True)
-                
-                # SWI vs Risk scatter
-                fig2 = px.scatter(
-                    df, x="SWI", y="risk_score",
-                    color="alert_level", title="Soil Water Index vs Risk Score",
-                    labels={"SWI": "Soil Water Index", "risk_score": "Risk Score"},
-                    color_discrete_map={
-                        "EXTREME": "#cc0000", "HIGH": "#ff4444",
-                        "ELEVATED": "#ff8c00", "MODERATE": "#ffd700", "LOW": "#2ecc71"
-                    },
-                )
+
+                col1, col2 = st.columns(2)
+                fig2 = px.bar(df.groupby(group_col)["SWI"].mean().round(2).reset_index(),
+                              x=group_col, y="SWI", color="SWI", color_continuous_scale="Blues",
+                              title=f"Soil Water Index by {group_col.title()}")
                 fig2.update_layout(height=300)
-                st.plotly_chart(fig2, use_container_width=True)
-                
+                col1.plotly_chart(fig2, use_container_width=True)
+
+                fig3 = px.scatter(df, x="SWI", y="risk_score", color="alert_level",
+                                  title="SWI vs Risk Score",
+                                  color_discrete_map={"EXTREME":"#cc0000","HIGH":"#ff4444","ELEVATED":"#ff8c00","MODERATE":"#ffd700","LOW":"#2ecc71"},
+                                  hover_data=["slope_id", group_col])
+                fig3.update_layout(height=300)
+                col2.plotly_chart(fig3, use_container_width=True)
+
+                with st.expander("📋 Full Slope Rainfall Table"):
+                    cols = [c for c in ["slope_id", group_col, "R_24hr","R_3day","R_7day","R_15day","SWI","data_source"] if c in df.columns]
+                    st.dataframe(df[cols].sort_values("R_24hr", ascending=False), use_container_width=True, hide_index=True)
             except ImportError:
-                st.info("Install plotly for charts: pip install plotly")
-                st.dataframe(df[["slope_id", "taluk", "R_24hr", "R_7day", "SWI"]].head(20))
-        else:
-            st.info("Run computation first to see rainfall analysis.")
-            
-            # ID Threshold demo
-            st.markdown("**Intensity-Duration Threshold Curve (Preview)**")
-            try:
-                import plotly.graph_objects as go
-                
-                durations = np.linspace(0.1, 72, 100)
-                alpha, beta = 10.0, 0.40
-                threshold = alpha * durations ** (-beta)
-                
-                fig = go.Figure()
-                fig.add_trace(go.Scatter(x=durations, y=threshold, mode='lines', name='I-D Threshold',
-                                        line=dict(color='red', width=2)))
-                fig.update_layout(
-                    title="Rainfall Intensity-Duration Threshold",
-                    xaxis_title="Duration (hours)", yaxis_title="Intensity (mm/hr)",
-                    height=280, xaxis_type="log", yaxis_type="log",
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            except ImportError:
-                pass
+                st.dataframe(df[["slope_id", group_col, "R_24hr","R_7day","SWI"]].head(30))
+
+    # ── SUB-TAB 3: MANUAL STATION ──
+    with r_tabs[2]:
+        col1, col2 = st.columns(2)
+        with col1:
+            st.markdown("**➕ Add Rain Gauge Station**")
+            station_name = st.text_input("Station Name", "", key="stn_name")
+            center = get_current_center()
+            manual_lat = st.number_input("Latitude", value=round(center[0], 4), format="%.4f", key="m_lat")
+            manual_lon = st.number_input("Longitude", value=round(center[1], 4), format="%.4f", key="m_lon")
+            today_rain = st.number_input("Today's Rainfall (mm)", min_value=0.0, max_value=500.0, value=0.0, step=0.5, key="t_rain")
+            yesterday_rain = st.number_input("Yesterday (mm)", min_value=0.0, max_value=500.0, value=0.0, step=0.5, key="y_rain")
+            day2_rain = st.number_input("2 days ago (mm)", min_value=0.0, max_value=500.0, value=0.0, step=0.5, key="d2_rain")
+            if st.button("➕ Add Station", use_container_width=True, type="primary", key="add_stn"):
+                if "rain_stations" not in st.session_state:
+                    st.session_state.rain_stations = []
+                st.session_state.rain_stations.append({
+                    "name": station_name or f"Station_{len(st.session_state.get('rain_stations',[]))+1}",
+                    "lat": manual_lat, "lon": manual_lon,
+                    "today_mm": today_rain, "yesterday_mm": yesterday_rain, "day2_mm": day2_rain,
+                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                    "state": st.session_state.selected_state,
+                    "district": st.session_state.selected_district or "",
+                    "taluk": st.session_state.selected_taluk or "",
+                })
+                st.session_state.manual_rainfall = {"today_mm": today_rain}
+                st.success("✅ Station added! Click **Compute Risk Scores** to apply.")
+        with col2:
+            if "rain_stations" in st.session_state and st.session_state.rain_stations:
+                st.markdown("**📡 Active Stations:**")
+                for s in st.session_state.rain_stations:
+                    st.markdown(f"""<div style="background:white;border-radius:8px;padding:0.6rem 0.9rem;margin:0.3rem 0;
+                        box-shadow:0 1px 4px rgba(0,0,0,0.08);border-left:3px solid #3498db;">
+                        <b>📡 {s['name']}</b> <span style="float:right;font-size:0.75rem;color:#718096;">{s['timestamp']}</span><br>
+                        <small>📍 {s.get('district','')} › {s.get('taluk','')}</small><br>
+                        <small>Today: <b>{s['today_mm']} mm</b> | Yesterday: {s['yesterday_mm']} mm</small></div>""", unsafe_allow_html=True)
+                if st.button("🗑️ Clear All Stations"):
+                    st.session_state.rain_stations = []
+                    st.session_state.manual_rainfall = None
+                    st.rerun()
+                stations_csv = pd.DataFrame(st.session_state.rain_stations).to_csv(index=False)
+                st.download_button("⬇️ Export CSV", stations_csv, "rain_stations.csv", "text/csv")
+            else:
+                st.info("No stations added yet.")
 
 
 # ═══════════════════════════════════════════════════════════════════

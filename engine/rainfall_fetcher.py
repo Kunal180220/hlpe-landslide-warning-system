@@ -69,6 +69,34 @@ def compute_antecedent_index(rainfall_series: List[float]) -> Dict:
     }
 
 
+def fetch_live_rainfall_for_location(lat: float, lon: float, days_back: int = 15) -> Dict:
+    """
+    Fetch live rainfall for a single lat/lon from Open-Meteo.
+    Returns dict with dates, values, source label.
+    """
+    data = fetch_openmeteo(lat, lon, days_back=days_back)
+    if data and "daily" in data:
+        dates = data["daily"].get("time", [])
+        values = data["daily"].get("precipitation_sum", [])
+        values = [float(v) if v is not None else 0.0 for v in values]
+        return {
+            "dates": dates,
+            "values": values,
+            "source": "Open-Meteo (Live)",
+            "lat": lat,
+            "lon": lon,
+            "success": True,
+        }
+    return {
+        "dates": [],
+        "values": [],
+        "source": "API Failed",
+        "lat": lat,
+        "lon": lon,
+        "success": False,
+    }
+
+
 def get_rainfall_for_slope_units(
     slope_df,
     manual_rainfall: Optional[Dict] = None,
@@ -77,46 +105,55 @@ def get_rainfall_for_slope_units(
     """
     Get rainfall data for all slope units.
     Returns df with rainfall columns added.
+    Clearly labels data source: 'Live API', 'Manual', or 'Synthetic'.
     """
     df = slope_df.copy()
-    
-    # Representative points — use centroid of each unique lat/lon cluster
-    # For speed, group nearby points and fetch once per cluster
     df["lat_r"] = df["lat"].round(1)
     df["lon_r"] = df["lon"].round(1)
-    
+
     cache = {}
-    
+
     for idx, row in df.iterrows():
         key = (row["lat_r"], row["lon_r"])
-        
+
         if key not in cache:
             data = None
+            source = "Synthetic"
+
             if use_api:
                 data = fetch_openmeteo(key[0], key[1], days_back=15)
-            
+
             if data and "daily" in data:
                 rain_list = data["daily"].get("precipitation_sum", [])
                 rain_list = [float(r) if r is not None else 0.0 for r in rain_list]
+                dates = data["daily"].get("time", [])
+                source = "Live API (Open-Meteo)"
             else:
-                # Synthetic fallback — realistic monsoon pattern
+                # Synthetic fallback — clearly labelled
                 np.random.seed(int(abs(key[0] * 100 + key[1] * 10)))
                 rain_list = list(np.random.exponential(5, 15))
-                rain_list[-1] = np.random.exponential(8)  # today
-            
-            # Override with manual entry if provided
-            if manual_rainfall:
-                rain_list[-1] = manual_rainfall.get("today_mm", rain_list[-1])
-            
+                rain_list[-1] = np.random.exponential(8)
+                today = datetime.now()
+                dates = [(today - timedelta(days=i)).strftime("%Y-%m-%d")
+                         for i in range(14, -1, -1)]
+                source = "Synthetic (API OFF)"
+
+            # Manual override
+            if manual_rainfall and manual_rainfall.get("today_mm", 0) > 0:
+                rain_list[-1] = manual_rainfall["today_mm"]
+                source = "Manual Entry"
+
             swi = compute_swi(rain_list)
             api = compute_antecedent_index(rain_list)
             api["SWI_current"] = round(swi[-1], 3)
             api["SWI_max"] = round(max(swi) if swi else 20.0, 3)
             api["m_ratio"] = round(min(swi[-1] / max(max(swi), 1.0), 1.0), 3)
             api["rainfall_series"] = rain_list
-            
+            api["rainfall_dates"] = dates
+            api["data_source"] = source
+
             cache[key] = api
-        
+
         entry = cache[key]
         df.at[idx, "R_24hr"] = entry["R_24hr"]
         df.at[idx, "R_3day"] = entry["R_3day"]
@@ -125,5 +162,9 @@ def get_rainfall_for_slope_units(
         df.at[idx, "API"] = entry["API"]
         df.at[idx, "SWI"] = entry["SWI_current"]
         df.at[idx, "m_ratio"] = entry["m_ratio"]
-    
+        df.at[idx, "data_source"] = entry["data_source"]
+        # Store serialized series for chart
+        df.at[idx, "rainfall_series"] = json.dumps(entry["rainfall_series"])
+        df.at[idx, "rainfall_dates"] = json.dumps(entry["rainfall_dates"])
+
     return df
