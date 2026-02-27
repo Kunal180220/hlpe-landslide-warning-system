@@ -1,391 +1,207 @@
 """
-factor_of_safety.py
-====================
-Physics-based slope stability engine for HLPE.
-
-Implements:
-- Infinite Slope Model (core)
-- Iverson (2000) pore pressure response
-- SWI-based saturation proxy
-- Newmark displacement estimate
-- Pedotransfer functions for soil parameters
+Factor of Safety Calculator
+Infinite slope model with partial saturation from SWI.
 """
 
 import numpy as np
 import pandas as pd
-from dataclasses import dataclass, field
-from typing import Optional, Dict, Tuple
-from loguru import logger
+from typing import Dict, Tuple
 
 
-# ─────────────────────────────────────────────────────────
-# SOIL PARAMETER LOOKUP (from texture class)
-# Based on Saxton & Rawls (2006) pedotransfer functions
-# ─────────────────────────────────────────────────────────
-
-SOIL_TEXTURE_PARAMS = {
-    # texture_class: (cohesion_kPa, friction_angle_deg, unit_weight_kNm3, Ks_ms)
-    'clay':         (10.0, 20.0, 18.5, 1e-8),
-    'silty_clay':   (8.0,  22.0, 18.0, 5e-8),
-    'sandy_clay':   (6.0,  25.0, 17.5, 1e-7),
-    'clay_loam':    (5.0,  27.0, 17.8, 5e-7),
-    'silty_clay_loam': (4.5, 26.0, 17.5, 3e-7),
-    'sandy_clay_loam': (3.5, 28.0, 17.0, 8e-7),
-    'loam':         (3.0,  30.0, 17.0, 2e-6),
-    'silt_loam':    (2.5,  28.0, 16.5, 8e-7),
-    'silt':         (2.0,  26.0, 16.0, 5e-7),
-    'sandy_loam':   (2.0,  32.0, 16.5, 5e-6),
-    'loamy_sand':   (1.0,  34.0, 16.0, 2e-5),
-    'sand':         (0.5,  36.0, 15.5, 5e-5),
-    'default':      (5.0,  32.0, 18.0, 1e-6),
-}
-
-GEOLOGY_COHESION_FACTOR = {
-    # Multiplier on cohesion based on parent material
-    'granite':      1.5,
-    'basalt':       1.3,
-    'schist':       0.8,
-    'shale':        0.6,
-    'limestone':    1.2,
-    'sandstone':    1.0,
-    'alluvium':     0.7,
-    'colluvium':    0.6,
-    'default':      1.0,
-}
-
-
-@dataclass
-class SlopeParameters:
-    """All parameters for a slope unit stability analysis."""
-    slope_angle_deg: float          # β (degrees)
-    soil_depth_m: float = 1.5       # Z (m)
-    cohesion_kpa: float = 5.0       # C' (kPa)
-    friction_angle_deg: float = 32.0  # φ' (degrees)
-    soil_unit_weight: float = 18.0  # γs (kN/m³)
-    water_unit_weight: float = 9.81  # γw (kN/m³)
-    texture_class: str = 'default'
-    geology: str = 'default'
-    soil_depth_method: str = 'default'  # how depth was estimated
-
-
-@dataclass
-class StabilityResult:
-    """Complete output of slope stability analysis."""
-    factor_of_safety: float
-    fs_category: str               # EXTREME / HIGH / ELEVATED / MODERATE / LOW
-    saturation_ratio_m: float      # m (0-1)
-    pore_pressure_head_m: float
-    normal_stress_kpa: float
-    shear_strength_kpa: float
-    driving_stress_kpa: float
-    newmark_displacement_cm: float
-    failure_probability: float     # P(FS<1) from uncertainty
-    confidence: str                # HIGH / MEDIUM / LOW
-    warnings: list = field(default_factory=list)
-
-
-class FactorOfSafetyEngine:
+def calc_factor_of_safety(
+    slope_angle_deg: float,
+    soil_depth_m: float,
+    cohesion_kpa: float,
+    friction_angle_deg: float,
+    unit_weight_kn: float = 18.0,
+    m_ratio: float = 0.0,  # saturation ratio 0-1 from SWI
+) -> Dict:
     """
-    Computes slope stability using the infinite slope model
-    with dynamic pore pressure from SWI and antecedent rainfall.
+    Infinite slope stability: FS = (C' + (γs - γw·m)·Z·cos²β·tanφ') / (γs·Z·sinβ·cosβ)
     """
+    gamma_s = unit_weight_kn
+    gamma_w = 9.81
+    Z = soil_depth_m
+    beta = np.radians(slope_angle_deg)
+    phi = np.radians(friction_angle_deg)
+    C = cohesion_kpa
+    m = np.clip(m_ratio, 0.0, 1.0)
+    
+    cos_b = np.cos(beta)
+    sin_b = np.sin(beta)
+    
+    if sin_b < 1e-6:
+        return {"FS": 99.0, "status": "STABLE", "driving_stress": 0.0, "resisting_stress": 0.0}
+    
+    driving = gamma_s * Z * sin_b * cos_b
+    effective_normal = (gamma_s - gamma_w * m) * Z * cos_b ** 2
+    resisting = C + effective_normal * np.tan(phi)
+    
+    FS = resisting / (driving + 1e-10)
+    FS = round(float(np.clip(FS, 0.1, 20.0)), 3)
+    
+    # Newmark displacement proxy (mm)
+    if FS >= 1.0:
+        newmark_d = 0.0
+    else:
+        ky = FS  # yield acceleration proxy
+        newmark_d = round(10 ** (1.5 - 5.0 * ky), 1)  # simplified
+    
+    if FS < 1.0:
+        status = "FAIL"
+    elif FS < 1.2:
+        status = "CRITICAL"
+    elif FS < 1.5:
+        status = "WATCH"
+    else:
+        status = "STABLE"
+    
+    return {
+        "FS": FS,
+        "status": status,
+        "driving_stress": round(float(driving), 2),
+        "resisting_stress": round(float(resisting), 2),
+        "newmark_displacement_mm": newmark_d,
+        "pore_pressure_kpa": round(float(gamma_w * m * Z * cos_b ** 2), 2),
+    }
 
-    # FS thresholds
-    FS_EXTREME  = 0.9
-    FS_HIGH     = 1.1
-    FS_ELEVATED = 1.3
-    FS_MODERATE = 1.5
 
-    def __init__(self, config: dict):
-        self.config = config
-        phys = config.get('physics', {})
-        self.fs_thresholds = phys.get('fs_thresholds', {
-            'extreme': 0.9, 'high': 1.1, 'elevated': 1.3, 'moderate': 1.5
-        })
-        logger.info("FactorOfSafetyEngine initialized")
-
-    # ─────────────────────────────────────────────
-    # MAIN COMPUTATION
-    # ─────────────────────────────────────────────
-
-    def compute(self,
-                params: SlopeParameters,
-                rainfall_data: Dict) -> StabilityResult:
-        """
-        Full stability analysis for one slope unit.
-
-        Args:
-            params: Slope geometric and soil parameters
-            rainfall_data: Output dict from RainfallFetcher.get_current_rainfall()
-
-        Returns:
-            StabilityResult with FS and all derived quantities
-        """
-        warnings_list = []
-
-        # Apply geology modifier to cohesion
-        geo_factor = GEOLOGY_COHESION_FACTOR.get(
-            params.geology.lower(), GEOLOGY_COHESION_FACTOR['default'])
-        C = params.cohesion_kpa * geo_factor
-
-        # Get soil params from texture if not manually set
-        if params.texture_class != 'default':
-            tx_params = SOIL_TEXTURE_PARAMS.get(params.texture_class,
-                                                 SOIL_TEXTURE_PARAMS['default'])
-            C = max(C, tx_params[0] * geo_factor)
-            phi = tx_params[1]
-            gamma_s = tx_params[2]
-        else:
-            phi = params.friction_angle_deg
-            gamma_s = params.soil_unit_weight
-
-        gamma_w = params.water_unit_weight
-        Z = params.soil_depth_m
-        beta_deg = params.slope_angle_deg
-
-        # Validate slope angle
-        if beta_deg >= 90:
-            warnings_list.append("Slope angle ≥ 90°: vertical/overhanging — clamped to 89°")
-            beta_deg = 89.0
-        if beta_deg <= 0:
-            return self._flat_slope_result(warnings_list)
-
-        beta_rad = np.radians(beta_deg)
-        phi_rad  = np.radians(phi)
-
-        # ── Saturation ratio m from SWI ──
-        swi_norm = rainfall_data.get('swi_normalized', 0.0)
-        m = self._compute_saturation_ratio(swi_norm, rainfall_data)
-
-        # ── Pore pressure head ──
-        psi = m * Z * np.cos(beta_rad)**2  # pressure head at failure plane (m)
-
-        # ── Effective normal stress ──
-        sigma_n = (gamma_s * Z * np.cos(beta_rad)**2 -
-                   gamma_w * psi)  # kPa
-
-        # ── Shear strength (Mohr-Coulomb) ──
-        tau_strength = C + sigma_n * np.tan(phi_rad)
-
-        # ── Driving stress ──
-        tau_drive = gamma_s * Z * np.sin(beta_rad) * np.cos(beta_rad)
-
-        # ── Factor of Safety ──
-        if tau_drive <= 0:
-            fs = 999.0
-        else:
-            fs = tau_strength / tau_drive
-
-        # Clamp FS to sensible range
-        fs = max(0.01, min(fs, 10.0))
-
-        # ── Newmark Displacement (simplified) ──
-        disp = self._newmark_displacement(fs, beta_deg)
-
-        # ── Failure probability from uncertainty ──
-        p_fail = self._failure_probability(fs, params)
-
-        # ── Category ──
-        category = self._categorize_fs(fs)
-
-        # ── Confidence ──
-        confidence = self._assess_confidence(
-            params, rainfall_data.get('data_quality', 'MEDIUM'))
-
-        # ── Additional warnings ──
-        if swi_norm > 0.8:
-            warnings_list.append("⚠️ Very high soil water index — near saturation")
-        if rainfall_data.get('r_today_mm', 0) > 50:
-            warnings_list.append("⚠️ Extreme daily rainfall (>50mm)")
-        if m > 0.9:
-            warnings_list.append("⚠️ Slope near full saturation")
-        if beta_deg > 45:
-            warnings_list.append("⚠️ Very steep slope — model uncertainty higher")
-
-        return StabilityResult(
-            factor_of_safety=round(fs, 3),
-            fs_category=category,
-            saturation_ratio_m=round(m, 3),
-            pore_pressure_head_m=round(psi, 3),
-            normal_stress_kpa=round(sigma_n, 2),
-            shear_strength_kpa=round(tau_strength, 2),
-            driving_stress_kpa=round(tau_drive, 2),
-            newmark_displacement_cm=round(disp, 2),
-            failure_probability=round(p_fail, 3),
-            confidence=confidence,
-            warnings=warnings_list
+def compute_fs_for_all(df: pd.DataFrame) -> pd.DataFrame:
+    """Apply FS calculation to entire slope unit dataframe"""
+    results = []
+    for _, row in df.iterrows():
+        m = row.get("m_ratio", 0.3)
+        fs_out = calc_factor_of_safety(
+            slope_angle_deg=row.get("slope_angle_deg", 25),
+            soil_depth_m=row.get("soil_depth_m", 1.5),
+            cohesion_kpa=row.get("cohesion_kpa", 8.0),
+            friction_angle_deg=row.get("friction_angle_deg", 28.0),
+            unit_weight_kn=row.get("unit_weight_kn", 18.0),
+            m_ratio=m,
         )
+        results.append(fs_out)
+    
+    fs_df = pd.DataFrame(results)
+    for col in fs_df.columns:
+        df[col] = fs_df[col].values
+    return df
 
-    def compute_batch(self,
-                      slope_df: pd.DataFrame,
-                      rainfall_data: Dict) -> pd.DataFrame:
-        """
-        Compute FS for all slope units in a DataFrame.
 
-        Expected columns in slope_df:
-            slope_angle_deg, soil_depth_m, cohesion_kpa,
-            friction_angle_deg, texture_class, geology
-        """
-        results = []
-        for idx, row in slope_df.iterrows():
-            params = SlopeParameters(
-                slope_angle_deg=row.get('slope_angle_deg', 30),
-                soil_depth_m=row.get('soil_depth_m', 1.5),
-                cohesion_kpa=row.get('cohesion_kpa', 5.0),
-                friction_angle_deg=row.get('friction_angle_deg', 32.0),
-                soil_unit_weight=row.get('unit_weight', 18.0),
-                texture_class=row.get('texture_class', 'default'),
-                geology=row.get('geology', 'default'),
-            )
+def id_threshold_check(R_24hr: float, R_15day: float, geology: str = "default") -> Dict:
+    """
+    Rainfall Intensity-Duration threshold check.
+    Returns exceedance flag and position on curve.
+    """
+    # Regional ID parameters (alpha, beta for I = alpha * D^-beta)
+    params = {
+        "Charnockite": (12.0, 0.45),
+        "Gneiss": (10.0, 0.40),
+        "Schist": (8.0, 0.38),
+        "Granite": (14.0, 0.42),
+        "default": (10.0, 0.40),
+    }
+    alpha, beta = params.get(geology, params["default"])
+    
+    # Duration = 1 day, intensity = R_24hr
+    threshold = alpha * (1.0 ** (-beta))
+    
+    # Position on curve (> 1.0 means exceeded)
+    position = R_24hr / (threshold + 1e-6)
+    
+    # Antecedent factor
+    antecedent_factor = 1.0 + (R_15day / 150.0)  # wet antecedent lowers threshold
+    adjusted_threshold = threshold / antecedent_factor
+    adjusted_position = R_24hr / (adjusted_threshold + 1e-6)
+    
+    return {
+        "id_threshold_mm": round(threshold, 1),
+        "id_adjusted_threshold_mm": round(adjusted_threshold, 1),
+        "id_exceedance_ratio": round(adjusted_position, 3),
+        "id_exceeded": adjusted_position >= 1.0,
+    }
 
-            # Use location-specific rainfall if available
-            loc_rain = rainfall_data
-            if 'lat' in row and 'lon' in row:
-                # Could fetch point-specific rainfall here
-                pass
 
-            result = self.compute(params, loc_rain)
-            results.append({
-                'slope_id': idx,
-                'factor_of_safety': result.factor_of_safety,
-                'fs_category': result.fs_category,
-                'saturation_m': result.saturation_ratio_m,
-                'pore_pressure_m': result.pore_pressure_head_m,
-                'newmark_disp_cm': result.newmark_displacement_cm,
-                'failure_prob': result.failure_probability,
-                'confidence': result.confidence,
-                'warnings': '; '.join(result.warnings)
-            })
+def compute_consensus_score(row) -> Dict:
+    """
+    Compute final consensus risk score from FS, ID, SWI.
+    Risk = w1*(FS danger) + w2*(ID exceeded) + w3*(SWI saturation)
+    """
+    FS = row.get("FS", 1.5)
+    id_ratio = row.get("id_exceedance_ratio", 0.5)
+    swi = row.get("SWI", 0.0)
+    past_ls = row.get("past_landslide", 0)
+    
+    # FS component (0-1)
+    if FS < 1.0:
+        fs_score = 1.0
+    elif FS < 1.5:
+        fs_score = (1.5 - FS) / 0.5
+    else:
+        fs_score = 0.0
+    
+    # ID component (0-1)
+    id_score = min(id_ratio, 2.0) / 2.0
+    
+    # SWI component (0-1)
+    swi_score = min(swi / 30.0, 1.0)
+    
+    # Past landslide reactivation penalty
+    reactivation_bonus = 0.15 if past_ls == 1 else 0.0
+    
+    # Weights
+    raw = 0.35 * fs_score + 0.30 * id_score + 0.20 * swi_score + 0.15 * reactivation_bonus
+    risk_score = round(min(raw + reactivation_bonus, 1.0) * 100, 1)
+    
+    if risk_score >= 80:
+        alert = "EXTREME"
+        color = "#2c0a0a"
+        bg = "#ff2929"
+    elif risk_score >= 60:
+        alert = "HIGH"
+        color = "#ff4d4d"
+        bg = "#ff6b6b"
+    elif risk_score >= 40:
+        alert = "ELEVATED"
+        color = "#ff8c00"
+        bg = "#ffa500"
+    elif risk_score >= 20:
+        alert = "MODERATE"
+        color = "#ffd700"
+        bg = "#ffd700"
+    else:
+        alert = "LOW"
+        color = "#2ecc71"
+        bg = "#27ae60"
+    
+    return {
+        "risk_score": risk_score,
+        "alert_level": alert,
+        "risk_color": bg,
+    }
 
-        return pd.DataFrame(results)
 
-    # ─────────────────────────────────────────────
-    # SATURATION RATIO
-    # ─────────────────────────────────────────────
-
-    def _compute_saturation_ratio(self, swi_norm: float,
-                                   rainfall_data: Dict) -> float:
-        """
-        Compute saturation ratio m (0-1) using SWI + rainfall combination.
-        Based on SLIP model approach (Brocca et al., 2012).
-
-        m = 0 → fully dry slope
-        m = 1 → fully saturated (water table at surface)
-        """
-        # Base from SWI (long-term soil moisture memory)
-        m_swi = swi_norm
-
-        # Boost from today's rain (Iverson-style rapid response)
-        r_today = rainfall_data.get('r_today_mm', 0.0)
-        rapid_boost = min(r_today / 100.0, 0.3)  # max 30% boost from today
-
-        # Combine: 70% from SWI (antecedent), 30% from rapid response
-        m = 0.70 * m_swi + rapid_boost
-
-        return float(np.clip(m, 0.0, 1.0))
-
-    # ─────────────────────────────────────────────
-    # NEWMARK DISPLACEMENT
-    # ─────────────────────────────────────────────
-
-    def _newmark_displacement(self, fs: float, slope_deg: float) -> float:
-        """
-        Simplified Newmark displacement estimate.
-        Jibson (2007) empirical relationship.
-        Returns displacement in cm.
-        """
-        if fs >= 1.5:
-            return 0.0
-
-        # Critical acceleration ratio
-        Ia = max(0.0, 1.0 - (1.0 / max(fs, 0.01)))  # simplified
-
-        if Ia <= 0:
-            return 0.0
-
-        # Jibson (2007): ln(D) = 0.215 + log(Ia/(1-Ia)*Ia^0.5)
-        # Simplified version for pre-failure displacement
-        slope_factor = np.sin(np.radians(slope_deg)) / np.sin(np.radians(max(slope_deg - 5, 1)))
-        D = 0.5 * (1.0 - fs)**2 * slope_factor * 100  # cm
-
-        return float(max(0.0, D))
-
-    # ─────────────────────────────────────────────
-    # FAILURE PROBABILITY (UNCERTAINTY)
-    # ─────────────────────────────────────────────
-
-    def _failure_probability(self, fs: float, params: SlopeParameters) -> float:
-        """
-        Estimate P(failure) using simplified reliability analysis.
-        Assumes FS follows lognormal distribution with CoV based on data quality.
-        """
-        # Coefficient of variation based on data quality
-        cov_fs = 0.15  # 15% default uncertainty in FS
-
-        if params.texture_class == 'default':
-            cov_fs += 0.05  # more uncertainty without texture data
-
-        # Log-normal reliability
-        # β_reliability = ln(FS) / (CoV_FS) — simplified
-        if fs <= 0:
-            return 1.0
-
-        ln_fs = np.log(fs)
-        sigma_ln = cov_fs
-
-        # P(failure) = P(FS < 1) = Φ(-β)
-        from scipy.stats import norm
-        beta_r = ln_fs / sigma_ln
-        p_fail = float(norm.cdf(-beta_r))
-
-        return np.clip(p_fail, 0.0, 1.0)
-
-    # ─────────────────────────────────────────────
-    # HELPERS
-    # ─────────────────────────────────────────────
-
-    def _categorize_fs(self, fs: float) -> str:
-        t = self.fs_thresholds
-        if fs < t['extreme']:   return 'EXTREME'
-        elif fs < t['high']:    return 'HIGH'
-        elif fs < t['elevated']: return 'ELEVATED'
-        elif fs < t['moderate']: return 'MODERATE'
-        else:                   return 'LOW'
-
-    def _assess_confidence(self, params: SlopeParameters,
-                            data_quality: str) -> str:
-        score = 0
-        if params.texture_class != 'default': score += 1
-        if params.geology != 'default':       score += 1
-        if data_quality in ['HIGH']:          score += 2
-        elif data_quality in ['MEDIUM']:      score += 1
-        if params.soil_depth_method != 'default': score += 1
-        if score >= 4:   return 'HIGH'
-        elif score >= 2: return 'MEDIUM'
-        else:            return 'LOW'
-
-    def _flat_slope_result(self, warnings: list) -> StabilityResult:
-        return StabilityResult(
-            factor_of_safety=9.99,
-            fs_category='LOW',
-            saturation_ratio_m=0.0,
-            pore_pressure_head_m=0.0,
-            normal_stress_kpa=0.0,
-            shear_strength_kpa=999.0,
-            driving_stress_kpa=0.0,
-            newmark_displacement_cm=0.0,
-            failure_probability=0.0,
-            confidence='HIGH',
-            warnings=warnings + ['Flat slope — no landslide risk']
+def compute_all_scores(df: pd.DataFrame) -> pd.DataFrame:
+    """Full computation pipeline: FS → ID → Consensus"""
+    # 1. Factor of safety
+    df = compute_fs_for_all(df)
+    
+    # 2. ID threshold
+    id_results = []
+    for _, row in df.iterrows():
+        id_out = id_threshold_check(
+            R_24hr=row.get("R_24hr", 0),
+            R_15day=row.get("R_15day", 0),
+            geology=row.get("geology", "default"),
         )
-
-    def get_soil_params_from_texture(self, texture_class: str) -> Dict:
-        """Public method to get soil params from texture class."""
-        params = SOIL_TEXTURE_PARAMS.get(texture_class.lower(),
-                                          SOIL_TEXTURE_PARAMS['default'])
-        return {
-            'cohesion_kpa': params[0],
-            'friction_angle_deg': params[1],
-            'unit_weight_kNm3': params[2],
-            'hydraulic_conductivity_ms': params[3]
-        }
+        id_results.append(id_out)
+    id_df = pd.DataFrame(id_results)
+    for col in id_df.columns:
+        df[col] = id_df[col].values
+    
+    # 3. Consensus risk
+    scores = df.apply(compute_consensus_score, axis=1)
+    scores_df = pd.DataFrame(list(scores))
+    for col in scores_df.columns:
+        df[col] = scores_df[col].values
+    
+    return df

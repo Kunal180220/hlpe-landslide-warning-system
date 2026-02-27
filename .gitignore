@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# Data (large files)
+data/dynamic/
+*.tif
+*.tiff
+*.nc
+*.h5
+
+# Models (regenerable)
+models/*.pkl
+models/*.json
+
+# Logs
+logs/
+*.log
+
+# Reports
+reports/*.pdf
+
+# Streamlit
+.streamlit/
+
+# OS
+.DS_Store
+Thumbs.db
