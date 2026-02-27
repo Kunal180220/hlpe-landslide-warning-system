@@ -511,19 +511,309 @@ with tabs[0]:
         """
         m.get_root().html.add_child(folium.Element(legend_html))
         
-        st_folium(m, use_container_width=True, height=540)
-        
-        # Quick stats below map
-        if st.session_state.selected_district:
-            st.markdown("**Breakdown by Taluk:**")
-            taluk_summary = df.groupby("taluk").agg(
-                Total=("slope_id", "count"),
-                Extreme=("alert_level", lambda x: (x == "EXTREME").sum()),
-                High=("alert_level", lambda x: (x == "HIGH").sum()),
-                Avg_Score=("risk_score", "mean"),
-                Avg_FS=("FS", "mean"),
-            ).round(2).reset_index()
-            st.dataframe(taluk_summary, use_container_width=True, hide_index=True)
+        st_folium(m, use_container_width=True, height=480)
+
+        # ── SPATIAL CHOROPLETH — Area Risk Heatmap ──
+        st.markdown("---")
+        st.markdown("### 🗺️ Spatial Risk Overview")
+
+        group_col = "taluk" if st.session_state.selected_district else "district"
+        area_summary = df.groupby(group_col).agg(
+            Total=("slope_id", "count"),
+            Extreme=("alert_level", lambda x: (x == "EXTREME").sum()),
+            High=("alert_level", lambda x: (x == "HIGH").sum()),
+            Elevated=("alert_level", lambda x: (x == "ELEVATED").sum()),
+            Avg_Score=("risk_score", "mean"),
+            Max_Score=("risk_score", "max"),
+            Avg_FS=("FS", "mean"),
+            Rain_Today=("R_24hr", "mean"),
+            Rain_7day=("R_7day", "mean"),
+        ).round(2).reset_index()
+
+        # Determine dominant risk per area
+        def dominant_risk(row):
+            if row["Extreme"] > 0: return "EXTREME"
+            if row["High"] > 0: return "HIGH"
+            if row["Elevated"] > 0: return "ELEVATED"
+            if row["Avg_Score"] >= 20: return "MODERATE"
+            return "LOW"
+
+        area_summary["Dominant_Risk"] = area_summary.apply(dominant_risk, axis=1)
+
+        # Spatial choropleth map — filled rectangles per area
+        choropleth_center = get_current_center()
+        choropleth_zoom = get_zoom_for_level() - 1
+        mc = folium.Map(location=[choropleth_center[0], choropleth_center[1]],
+                        zoom_start=choropleth_zoom, tiles="CartoDB positron")
+
+        fill_colors = {
+            "EXTREME": "#cc0000", "HIGH": "#ff4444",
+            "ELEVATED": "#ff8c00", "MODERATE": "#ffd700", "LOW": "#2ecc71"
+        }
+        fill_opacity_map = {"EXTREME": 0.75, "HIGH": 0.65, "ELEVATED": 0.50, "MODERATE": 0.35, "LOW": 0.25}
+
+        if not st.session_state.selected_district:
+            # District-level choropleth
+            for _, arow in area_summary.iterrows():
+                dname = arow[group_col]
+                ddata = ADMIN_HIERARCHY.get(st.session_state.selected_state, {}).get("districts", {}).get(dname, {})
+                if "bbox" not in ddata:
+                    continue
+                db = ddata["bbox"]
+                risk = arow["Dominant_Risk"]
+                fc = fill_colors.get(risk, "#888")
+                fo = fill_opacity_map.get(risk, 0.3)
+                popup_html = f"""
+                <div style="font-family:sans-serif;min-width:200px;">
+                    <div style="background:{fc};color:white;padding:6px 10px;border-radius:6px 6px 0 0;">
+                        <b>📍 {dname}</b>
+                        <span style="float:right;">{alert_emoji(risk)} {risk}</span>
+                    </div>
+                    <div style="padding:8px 10px;border:1px solid #eee;border-radius:0 0 6px 6px;font-size:0.85rem;">
+                        Slopes analysed: <b>{int(arow['Total'])}</b><br>
+                        Avg Risk Score: <b>{arow['Avg_Score']}</b>/100<br>
+                        Extreme slopes: <b style="color:#cc0000;">{int(arow['Extreme'])}</b><br>
+                        High slopes: <b style="color:#ff4444;">{int(arow['High'])}</b><br>
+                        Avg FS: <b>{arow['Avg_FS']}</b><br>
+                        Rain today: <b>{arow['Rain_Today']} mm</b>
+                    </div>
+                </div>"""
+                folium.Rectangle(
+                    bounds=[[db[2], db[0]], [db[3], db[1]]],
+                    color=fc, weight=2,
+                    fill=True, fill_color=fc, fill_opacity=fo,
+                    popup=folium.Popup(popup_html, max_width=250),
+                    tooltip=f"📍 {dname} | {alert_emoji(risk)} {risk} | Score: {arow['Avg_Score']}",
+                ).add_to(mc)
+                # Label in center
+                lat_c = (db[2] + db[3]) / 2
+                lon_c = (db[0] + db[1]) / 2
+                folium.Marker(
+                    [lat_c, lon_c],
+                    icon=folium.DivIcon(
+                        html=f'<div style="font-size:10px;font-weight:700;color:{fc};'
+                             f'text-shadow:1px 1px 2px white,-1px -1px 2px white;'
+                             f'white-space:nowrap;">{dname}<br>{alert_emoji(risk)}</div>',
+                        icon_size=(100, 30), icon_anchor=(50, 15),
+                    )
+                ).add_to(mc)
+        else:
+            # Taluk-level choropleth
+            from engine.admin_hierarchy import get_all_taluks_in_district
+            taluks_data = get_all_taluks_in_district(st.session_state.selected_state, st.session_state.selected_district)
+            for _, arow in area_summary.iterrows():
+                tname = arow[group_col]
+                tdata = taluks_data.get(tname, {})
+                if "bbox" not in tdata:
+                    continue
+                tb = tdata["bbox"]
+                risk = arow["Dominant_Risk"]
+                fc = fill_colors.get(risk, "#888")
+                fo = fill_opacity_map.get(risk, 0.3)
+                popup_html = f"""
+                <div style="font-family:sans-serif;min-width:200px;">
+                    <div style="background:{fc};color:white;padding:6px 10px;border-radius:6px 6px 0 0;">
+                        <b>🔍 {tname}</b>
+                        <span style="float:right;">{alert_emoji(risk)} {risk}</span>
+                    </div>
+                    <div style="padding:8px 10px;border:1px solid #eee;font-size:0.85rem;">
+                        Slopes: <b>{int(arow['Total'])}</b> | Avg Score: <b>{arow['Avg_Score']}</b>/100<br>
+                        Extreme: <b style="color:#cc0000;">{int(arow['Extreme'])}</b> | High: <b style="color:#ff4444;">{int(arow['High'])}</b><br>
+                        Avg FS: <b>{arow['Avg_FS']}</b> | Rain: <b>{arow['Rain_Today']} mm</b>
+                    </div>
+                </div>"""
+                folium.Rectangle(
+                    bounds=[[tb[2], tb[0]], [tb[3], tb[1]]],
+                    color=fc, weight=2,
+                    fill=True, fill_color=fc, fill_opacity=fo,
+                    popup=folium.Popup(popup_html, max_width=250),
+                    tooltip=f"🔍 {tname} | {alert_emoji(risk)} {risk} | Score: {arow['Avg_Score']}",
+                ).add_to(mc)
+                lat_c = (tb[2] + tb[3]) / 2
+                lon_c = (tb[0] + tb[1]) / 2
+                folium.Marker(
+                    [lat_c, lon_c],
+                    icon=folium.DivIcon(
+                        html=f'<div style="font-size:10px;font-weight:700;color:{fc};'
+                             f'text-shadow:1px 1px 2px white,-1px -1px 2px white;'
+                             f'white-space:nowrap;">{tname}<br>{alert_emoji(risk)}</div>',
+                        icon_size=(100, 30), icon_anchor=(50, 15),
+                    )
+                ).add_to(mc)
+
+        # Choropleth legend
+        cleg = """<div style="position:fixed;bottom:20px;right:20px;z-index:1000;background:white;
+                  padding:10px 14px;border-radius:10px;box-shadow:0 2px 8px rgba(0,0,0,0.15);font-size:12px;">
+            <b>Area Risk Level</b><br>
+            <span style="background:#cc0000;padding:2px 8px;color:white;border-radius:3px;">EXTREME</span><br>
+            <span style="background:#ff4444;padding:2px 8px;color:white;border-radius:3px;">HIGH</span><br>
+            <span style="background:#ff8c00;padding:2px 8px;color:white;border-radius:3px;">ELEVATED</span><br>
+            <span style="background:#ffd700;padding:2px 8px;color:black;border-radius:3px;">MODERATE</span><br>
+            <span style="background:#2ecc71;padding:2px 8px;color:white;border-radius:3px;">LOW</span>
+        </div>"""
+        mc.get_root().html.add_child(folium.Element(cleg))
+        st_folium(mc, use_container_width=True, height=400)
+
+        # ── AREA RISK TABLE ──
+        st.markdown("---")
+        st.markdown(f"### 📋 Current Risk — by {group_col.title()}")
+
+        display_df = area_summary.copy()
+        display_df.columns = [group_col.title(), "Slopes", "⚫ Extreme", "🔴 High",
+                               "🟠 Elevated", "Avg Score", "Max Score", "Avg FS",
+                               "Rain Today (mm)", "Rain 7-day (mm)", "Risk Level"]
+
+        def style_risk(val):
+            colors = {"EXTREME": "background:#ffcccc;color:#cc0000;font-weight:700",
+                      "HIGH": "background:#ffe0e0;color:#e53e3e;font-weight:700",
+                      "ELEVATED": "background:#fff3e0;color:#c05621;font-weight:700",
+                      "MODERATE": "background:#fffff0;color:#975a16",
+                      "LOW": "background:#f0fff4;color:#276749"}
+            return colors.get(val, "")
+
+        st.dataframe(
+            display_df.style.applymap(style_risk, subset=["Risk Level"]),
+            use_container_width=True, hide_index=True
+        )
+
+        # ── 3-DAY FORECAST TABLE ──
+        st.markdown("---")
+        st.markdown("### 📅 3-Day Risk Forecast")
+
+        from engine.forecast_engine import get_area_forecast
+        use_api_forecast = st.session_state.use_api
+
+        with st.spinner("Loading 3-day forecast..."):
+            fc_data = get_area_forecast(
+                st.session_state.selected_state,
+                st.session_state.selected_district,
+                st.session_state.selected_taluk,
+                df,
+                use_api=use_api_forecast,
+            )
+
+        raw_fc = fc_data["raw_forecast"]
+        src_label = fc_data["source"]
+
+        if src_label == "Synthetic":
+            st.warning("⚠️ Forecast is **synthetic** — turn ON Live Rainfall API toggle for real forecast.")
+        else:
+            st.success(f"✅ Live forecast from Open-Meteo")
+
+        # Day headers
+        if raw_fc:
+            d1 = raw_fc[0] if len(raw_fc) > 0 else {}
+            d2 = raw_fc[1] if len(raw_fc) > 1 else {}
+            d3 = raw_fc[2] if len(raw_fc) > 2 else {}
+
+            # Area forecast table
+            rows = []
+            for af in fc_data["area_forecasts"]:
+                rows.append({
+                    group_col.title(): af["area"],
+                    "Current Risk": af["current_risk"],
+                    f"Day 1 — {d1.get('date','')} {d1.get('weather_icon','')}": f"{af['day1'].get('risk','—')} | {af['day1'].get('rainfall_mm',0):.1f}mm",
+                    f"Day 2 — {d2.get('date','')} {d2.get('weather_icon','')}": f"{af['day2'].get('risk','—')} | {af['day2'].get('rainfall_mm',0):.1f}mm",
+                    f"Day 3 — {d3.get('date','')} {d3.get('weather_icon','')}": f"{af['day3'].get('risk','—')} | {af['day3'].get('rainfall_mm',0):.1f}mm",
+                })
+
+            fc_display = pd.DataFrame(rows)
+
+            def style_cell(val):
+                if "EXTREME" in str(val): return "background:#ffcccc;color:#cc0000;font-weight:700"
+                if "HIGH" in str(val): return "background:#ffe0e0;color:#e53e3e;font-weight:700"
+                if "ELEVATED" in str(val): return "background:#fff3e0;color:#c05621"
+                if "MODERATE" in str(val): return "background:#fffff0;color:#975a16"
+                if "LOW" in str(val): return "background:#f0fff4;color:#276749"
+                return ""
+
+            st.dataframe(
+                fc_display.style.applymap(style_cell),
+                use_container_width=True, hide_index=True
+            )
+
+            # ── RAINFALL FORECAST CHART ──
+            st.markdown("---")
+            st.markdown("### 🌧️ Rainfall Forecast — Next 3 Days")
+
+            try:
+                import plotly.graph_objects as go
+
+                fc_dates = [f"{fc.get('date','')} {fc.get('weather_icon','')}" for fc in raw_fc]
+                fc_rain = [fc.get("rainfall_mm", 0) for fc in raw_fc]
+                fc_prob = [fc.get("rain_probability_pct", 0) for fc in raw_fc]
+
+                bar_colors = ["#e74c3c" if r > 30 else "#f39c12" if r > 10 else "#3498db" for r in fc_rain]
+
+                fig = go.Figure()
+                fig.add_trace(go.Bar(
+                    x=fc_dates, y=fc_rain,
+                    marker_color=bar_colors,
+                    name="Forecast Rainfall (mm)",
+                    hovertemplate="%{x}<br>Rainfall: <b>%{y:.1f} mm</b><extra></extra>",
+                ))
+                fig.add_trace(go.Scatter(
+                    x=fc_dates, y=fc_prob,
+                    mode="lines+markers+text",
+                    name="Rain Probability (%)",
+                    line=dict(color="#9b59b6", width=2.5, dash="dot"),
+                    yaxis="y2",
+                    text=[f"{p:.0f}%" for p in fc_prob],
+                    textposition="top center",
+                ))
+                fig.add_hline(y=30, line_dash="dash", line_color="red",
+                              annotation_text="Heavy Rain (30mm)")
+                fig.add_hline(y=10, line_dash="dot", line_color="orange",
+                              annotation_text="Moderate Rain (10mm)")
+                fig.update_layout(
+                    title=f"3-Day Rainfall Forecast — {st.session_state.selected_state}"
+                          + (f" › {st.session_state.selected_district}" if st.session_state.selected_district else ""),
+                    xaxis_title="Date",
+                    yaxis_title="Forecast Rainfall (mm)",
+                    yaxis2=dict(title="Rain Probability (%)", overlaying="y", side="right",
+                                range=[0, 120], showgrid=False),
+                    height=380,
+                    legend=dict(orientation="h", y=1.12),
+                    plot_bgcolor="#f8f9fa",
+                )
+                st.plotly_chart(fig, use_container_width=True)
+
+                # Per-area forecast bars
+                if len(fc_data["area_forecasts"]) > 1:
+                    st.markdown(f"**Projected Rainfall by {group_col.title()}**")
+                    area_fc_rows = []
+                    for af in fc_data["area_forecasts"]:
+                        area_fc_rows.append({
+                            group_col.title(): af["area"],
+                            "Day 1 (mm)": af["day1"].get("rainfall_mm", 0),
+                            "Day 2 (mm)": af["day2"].get("rainfall_mm", 0),
+                            "Day 3 (mm)": af["day3"].get("rainfall_mm", 0),
+                        })
+                    area_fc_df = pd.DataFrame(area_fc_rows)
+                    fig2 = go.Figure()
+                    days = ["Day 1 (mm)", "Day 2 (mm)", "Day 3 (mm)"]
+                    day_colors = ["#3498db", "#8e44ad", "#e74c3c"]
+                    for day, dc in zip(days, day_colors):
+                        fig2.add_trace(go.Bar(
+                            x=area_fc_df[group_col.title()],
+                            y=area_fc_df[day],
+                            name=day, marker_color=dc,
+                        ))
+                    fig2.update_layout(
+                        barmode="group",
+                        title=f"3-Day Forecast Rain by {group_col.title()}",
+                        xaxis_title=group_col.title(),
+                        yaxis_title="Rainfall (mm)",
+                        height=320,
+                    )
+                    st.plotly_chart(fig2, use_container_width=True)
+
+            except ImportError:
+                st.table(pd.DataFrame({
+                    "Date": fc_dates,
+                    "Forecast Rain (mm)": fc_rain,
+                    "Probability (%)": fc_prob,
+                }))
 
 
 # ═══════════════════════════════════════════════════════════════════
